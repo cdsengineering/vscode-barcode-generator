@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build / package artifacts
+*.vsix
+*.tgz
+out/
+dist/
+coverage/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# VS Code local settings
+.vscode/*
+!.vscode/launch.json
+
+# OS files
+.DS_Store

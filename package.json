@@ -1,0 +1,66 @@
+{
+  "name": "barcode-generator",
+  "displayName": "Barcode Generator",
+  "description": "Generate barcodes from selected text and export them as PDF",
+  "version": "0.0.1",
+  "publisher": "cdsengineering",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cdsengineering/vscode-barcode-generator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cdsengineering/vscode-barcode-generator/issues"
+  },
+  "homepage": "https://github.com/cdsengineering/vscode-barcode-generator#readme",
+  "keywords": [
+    "barcode",
+    "ean13",
+    "code128",
+    "qrcode",
+    "pdf",
+    "vscode-extension"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:barcodeGenerator.generateFromSelection"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "barcodeGenerator.generateFromSelection",
+        "title": "Generate Barcode",
+        "category": "Barcode"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "barcodeGenerator.generateFromSelection",
+          "group": "navigation@100",
+          "when": "editorHasSelection"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "lint": "echo \"No lint configured\"",
+    "test": "echo \"No tests configured\"",
+    "package:vsix": "npx @vscode/vsce package",
+    "publish:vsce": "npx @vscode/vsce publish"
+  },
+  "dependencies": {
+    "jsbarcode": "^3.12.1",
+    "pdf-lib": "^1.17.1",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0"
+  }
+}
