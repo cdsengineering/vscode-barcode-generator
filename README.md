@@ -59,3 +59,4 @@ You must have a valid Azure DevOps Personal Access Token configured for `vsce` b
 
 - `package.json`: extension manifest, commands, scripts, publishing metadata
 - `src/extension.js`: selection rules, EAN13 validation, webview rendering, clipboard copy, PDF export
+- `THIRD_PARTY_NOTICES.md`: third-party libraries and licenses
