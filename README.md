@@ -13,6 +13,10 @@ A VS Code extension that adds a right-click command to generate a barcode from t
 - Click the barcode image to copy it to clipboard (`Copied to clipboard` toast)
 - Export the current barcode/QR as an A4 PDF (`Export PDF`)
 
+## Screenshot
+
+![Barcode Generator Screenshot](media/screenshot.png)
+
 ## Run locally
 
 1. Open this folder in VS Code.

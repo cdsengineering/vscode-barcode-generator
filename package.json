@@ -16,6 +16,7 @@
     "url": "https://github.com/cdsengineering/vscode-barcode-generator/issues"
   },
   "homepage": "https://github.com/cdsengineering/vscode-barcode-generator#readme",
+  "icon": "media/icon.png",
   "keywords": [
     "barcode",
     "ean13",
