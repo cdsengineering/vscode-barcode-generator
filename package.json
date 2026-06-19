@@ -2,7 +2,7 @@
   "name": "vscode-barcode-generator",
   "displayName": "Barcode Generator",
   "description": "Generate barcodes from selected text and export them as PDF",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "publisher": "CDSEngineeringSA",
   "license": "MIT",
   "engines": {

@@ -1,9 +1,14 @@
 const vscode = require('vscode');
 const QRCode = require('qrcode');
+const JsBarcode = require('jsbarcode');
 const fs = require('fs/promises');
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 const COMMAND_ID = 'barcodeGenerator.generateFromSelection';
+const A4_WIDTH = 595.28;
+const A4_HEIGHT = 841.89;
+const PAGE_MARGIN = 36;
+const MAX_CODES_PER_PAGE = 60;
 
 function activate(context) {
   const disposable = vscode.commands.registerCommand(COMMAND_ID, async () => {
@@ -18,6 +23,12 @@ function activate(context) {
 
     if (!selectedText) {
       vscode.window.showErrorMessage('Please select text to generate a barcode.');
+      return;
+    }
+
+    const selectedCodes = getSelectedCodeLines(selectedText);
+    if (selectedCodes.length > 1) {
+      await exportBarcodeListFromSelection(selectedCodes);
       return;
     }
 
@@ -37,25 +48,20 @@ function activate(context) {
  * @returns {Promise<{ type: 'ean13'|'code128'|'qrcode', value: string, label: string } | null>}
  */
 async function resolveBarcodeType(value) {
-  if (/^\d{12}$/.test(value)) {
-    const completed = `${value}${computeEan13CheckDigit(value)}`;
-    vscode.window.showInformationMessage(`EAN13 generated with check digit: ${completed}`);
-    return {
-      type: 'ean13',
-      value: completed,
-      label: 'EAN13'
-    };
-  }
-
-  if (/^\d{13}$/.test(value)) {
-    if (!isValidEan13(value)) {
-      vscode.window.showErrorMessage('Invalid EAN13: check digit parity is incorrect. Generation is not possible.');
+  const ean13 = resolveEan13Value(value);
+  if (ean13) {
+    if (ean13.error) {
+      vscode.window.showErrorMessage(ean13.error);
       return null;
+    }
+
+    if (ean13.addedCheckDigit) {
+      vscode.window.showInformationMessage(`EAN13 generated with check digit: ${ean13.value}`);
     }
 
     return {
       type: 'ean13',
-      value,
+      value: ean13.value,
       label: 'EAN13'
     };
   }
@@ -80,6 +86,168 @@ async function resolveBarcodeType(value) {
     value,
     label: picked.label
   };
+}
+
+/**
+ * @param {string} text
+ */
+function getSelectedCodeLines(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+/**
+ * @param {string[]} values
+ */
+async function exportBarcodeListFromSelection(values) {
+  const list = await resolveBarcodeList(values);
+  if (!list) {
+    return;
+  }
+
+  const codesPerPage = await askCodesPerPage(values.length);
+  if (!codesPerPage) {
+    return;
+  }
+
+  const saveUri = await showPdfSaveDialog('Export Barcode List as PDF', 'barcodes.pdf');
+  if (!saveUri) {
+    return;
+  }
+
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Generating barcode PDF',
+        cancellable: false
+      },
+      async (progress) => {
+        await exportBarcodeListPdf(list.items, codesPerPage, saveUri, progress);
+      }
+    );
+
+    const checkDigitMessage = list.addedCheckDigits > 0
+      ? `${list.addedCheckDigits} EAN13 check digit${list.addedCheckDigits > 1 ? 's' : ''} added.`
+      : '';
+    const exportedMessage = `PDF exported: ${saveUri.fsPath}`;
+    vscode.window.showInformationMessage(checkDigitMessage ? `${exportedMessage}. ${checkDigitMessage}` : exportedMessage);
+  } catch (error) {
+    vscode.window.showErrorMessage(`Unable to export barcode list PDF: ${String(error)}`);
+  }
+}
+
+/**
+ * @param {string[]} values
+ * @returns {Promise<{ items: Array<{ type: 'ean13'|'code128'|'qrcode', value: string, label: string }>, addedCheckDigits: number } | null>}
+ */
+async function resolveBarcodeList(values) {
+  const ean13Values = values.map(resolveEan13Value);
+  const allValuesAreEan13Candidates = ean13Values.every(Boolean);
+
+  if (allValuesAreEan13Candidates) {
+    const invalidIndex = ean13Values.findIndex((result) => result.error);
+    if (invalidIndex !== -1) {
+      vscode.window.showErrorMessage(`Invalid EAN13 at item ${invalidIndex + 1}: check digit parity is incorrect.`);
+      return null;
+    }
+
+    return {
+      items: ean13Values.map((result) => ({
+        type: 'ean13',
+        value: result.value,
+        label: 'EAN13'
+      })),
+      addedCheckDigits: ean13Values.filter((result) => result.addedCheckDigit).length
+    };
+  }
+
+  const picked = await vscode.window.showQuickPick(
+    [
+      { label: 'Code 128', type: 'code128' },
+      { label: 'QR Code', type: 'qrcode' }
+    ],
+    {
+      title: 'Choose barcode format for the selected list',
+      placeHolder: 'The selected list is not entirely EAN13 numeric'
+    }
+  );
+
+  if (!picked) {
+    return null;
+  }
+
+  return {
+    items: values.map((value) => ({
+      type: picked.type,
+      value,
+      label: picked.label
+    })),
+    addedCheckDigits: 0
+  };
+}
+
+/**
+ * @param {number} total
+ */
+async function askCodesPerPage(total) {
+  const input = await vscode.window.showInputBox({
+    title: 'Barcode list PDF layout',
+    prompt: `How many barcodes per page? ${total} selected.`,
+    placeHolder: 'For example: 8',
+    value: String(Math.min(total, 8)),
+    validateInput(value) {
+      const trimmed = value.trim();
+      if (!/^\d+$/.test(trimmed)) {
+        return 'Enter a whole number.';
+      }
+
+      const number = Number(trimmed);
+      if (number < 1 || number > MAX_CODES_PER_PAGE) {
+        return `Enter a number between 1 and ${MAX_CODES_PER_PAGE}.`;
+      }
+
+      return null;
+    }
+  });
+
+  if (!input) {
+    return null;
+  }
+
+  return Number(input.trim());
+}
+
+/**
+ * @param {string} value
+ * @returns {{ value: string, addedCheckDigit: boolean, error?: string } | null}
+ */
+function resolveEan13Value(value) {
+  if (/^\d{12}$/.test(value)) {
+    return {
+      value: `${value}${computeEan13CheckDigit(value)}`,
+      addedCheckDigit: true
+    };
+  }
+
+  if (/^\d{13}$/.test(value)) {
+    if (!isValidEan13(value)) {
+      return {
+        value,
+        addedCheckDigit: false,
+        error: 'Invalid EAN13: check digit parity is incorrect. Generation is not possible.'
+      };
+    }
+
+    return {
+      value,
+      addedCheckDigit: false
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -159,18 +327,7 @@ async function openBarcodeWebview(context, payload) {
 }
 
 async function exportPdfFromPngDataUrl(dataUrl) {
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  const defaultUri = workspaceFolder
-    ? vscode.Uri.joinPath(workspaceFolder.uri, 'barcode.pdf')
-    : undefined;
-
-  const saveUri = await vscode.window.showSaveDialog({
-    title: 'Export Barcode as PDF',
-    filters: { PDF: ['pdf'] },
-    saveLabel: 'Export PDF',
-    defaultUri
-  });
-
+  const saveUri = await showPdfSaveDialog('Export Barcode as PDF', 'barcode.pdf');
   if (!saveUri) {
     return;
   }
@@ -180,17 +337,14 @@ async function exportPdfFromPngDataUrl(dataUrl) {
     const pdf = await PDFDocument.create();
     const pngImage = await pdf.embedPng(pngBytes);
 
-    const a4Width = 595.28;
-    const a4Height = 841.89;
-    const page = pdf.addPage([a4Width, a4Height]);
-    const margin = 36;
-    const maxWidth = a4Width - margin * 2;
-    const maxHeight = a4Height - margin * 2;
+    const page = pdf.addPage([A4_WIDTH, A4_HEIGHT]);
+    const maxWidth = A4_WIDTH - PAGE_MARGIN * 2;
+    const maxHeight = A4_HEIGHT - PAGE_MARGIN * 2;
     const scale = Math.min(maxWidth / pngImage.width, maxHeight / pngImage.height, 1);
     const drawWidth = pngImage.width * scale;
     const drawHeight = pngImage.height * scale;
-    const x = (a4Width - drawWidth) / 2;
-    const y = (a4Height - drawHeight) / 2;
+    const x = (A4_WIDTH - drawWidth) / 2;
+    const y = (A4_HEIGHT - drawHeight) / 2;
 
     page.drawImage(pngImage, { x, y, width: drawWidth, height: drawHeight });
 
@@ -200,6 +354,288 @@ async function exportPdfFromPngDataUrl(dataUrl) {
   } catch (error) {
     vscode.window.showErrorMessage(`Unable to export PDF: ${String(error)}`);
   }
+}
+
+/**
+ * @param {string} title
+ * @param {string} defaultFileName
+ */
+async function showPdfSaveDialog(title, defaultFileName) {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  const defaultUri = workspaceFolder
+    ? vscode.Uri.joinPath(workspaceFolder.uri, defaultFileName)
+    : undefined;
+
+  return await vscode.window.showSaveDialog({
+    title,
+    filters: { PDF: ['pdf'] },
+    saveLabel: 'Export PDF',
+    defaultUri
+  });
+}
+
+/**
+ * @param {Array<{ type: 'ean13'|'code128'|'qrcode', value: string, label: string }>} items
+ * @param {number} codesPerPage
+ * @param {vscode.Uri} saveUri
+ * @param {{ report: (value: { message?: string, increment?: number }) => void }} progress
+ */
+async function exportBarcodeListPdf(items, codesPerPage, saveUri, progress) {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const grid = getBestGrid(codesPerPage, A4_WIDTH - PAGE_MARGIN * 2, A4_HEIGHT - PAGE_MARGIN * 2);
+
+  for (let index = 0; index < items.length; index += 1) {
+    if (index % codesPerPage === 0) {
+      pdf.addPage([A4_WIDTH, A4_HEIGHT]);
+    }
+
+    const page = pdf.getPages()[pdf.getPageCount() - 1];
+    const slot = index % codesPerPage;
+    await drawBarcodeListItem(pdf, page, items[index], slot, grid, font);
+    progress.report({ message: `${index + 1}/${items.length}` });
+  }
+
+  const pdfBytes = await pdf.save();
+  await fs.writeFile(saveUri.fsPath, Buffer.from(pdfBytes));
+}
+
+/**
+ * @param {number} itemCount
+ * @param {number} usableWidth
+ * @param {number} usableHeight
+ */
+function getBestGrid(itemCount, usableWidth, usableHeight) {
+  const targetRatio = 2.2;
+  let best = {
+    columns: 1,
+    rows: itemCount,
+    score: Number.POSITIVE_INFINITY
+  };
+
+  for (let columns = 1; columns <= itemCount; columns += 1) {
+    const rows = Math.ceil(itemCount / columns);
+    const cellRatio = (usableWidth / columns) / (usableHeight / rows);
+    const emptySlots = columns * rows - itemCount;
+    const score = Math.abs(Math.log(cellRatio / targetRatio)) + emptySlots * 0.03 + columns * 0.01;
+
+    if (score < best.score) {
+      best = { columns, rows, score };
+    }
+  }
+
+  return best;
+}
+
+/**
+ * @param {PDFDocument} pdf
+ * @param {import('pdf-lib').PDFPage} page
+ * @param {{ type: 'ean13'|'code128'|'qrcode', value: string, label: string }} item
+ * @param {number} slot
+ * @param {{ columns: number, rows: number }} grid
+ * @param {import('pdf-lib').PDFFont} font
+ */
+async function drawBarcodeListItem(pdf, page, item, slot, grid, font) {
+  const usableWidth = A4_WIDTH - PAGE_MARGIN * 2;
+  const usableHeight = A4_HEIGHT - PAGE_MARGIN * 2;
+  const cellWidth = usableWidth / grid.columns;
+  const cellHeight = usableHeight / grid.rows;
+  const column = slot % grid.columns;
+  const row = Math.floor(slot / grid.columns);
+  const x = PAGE_MARGIN + column * cellWidth;
+  const y = A4_HEIGHT - PAGE_MARGIN - (row + 1) * cellHeight;
+
+  if (item.type === 'qrcode') {
+    await drawQrCodePdfItem(pdf, page, item, x, y, cellWidth, cellHeight, font);
+    return;
+  }
+
+  drawLinearBarcodePdfItem(page, item, x, y, cellWidth, cellHeight, font);
+}
+
+/**
+ * @param {import('pdf-lib').PDFPage} page
+ * @param {{ type: 'ean13'|'code128', value: string, label: string }} item
+ * @param {number} x
+ * @param {number} y
+ * @param {number} cellWidth
+ * @param {number} cellHeight
+ * @param {import('pdf-lib').PDFFont} font
+ */
+function drawLinearBarcodePdfItem(page, item, x, y, cellWidth, cellHeight, font) {
+  const padding = Math.min(12, cellWidth * 0.08, cellHeight * 0.12);
+  const maxLabelWidth = cellWidth - padding * 2;
+  const displayLabel = getPdfSafeLabel(item.value);
+  const labelSize = fitTextSize(font, displayLabel, Math.min(12, Math.max(7, cellHeight * 0.09)), 5, maxLabelWidth);
+  const label = fitText(font, displayLabel, labelSize, maxLabelWidth);
+  const barcodeMaxHeight = Math.max(18, cellHeight - padding * 2 - labelSize - 8);
+  const barcodeHeight = Math.min(92, barcodeMaxHeight);
+  const contentHeight = barcodeHeight + labelSize + 8;
+  const bottomY = y + (cellHeight - contentHeight) / 2;
+  const barcodeY = bottomY + labelSize + 8;
+  const binary = getBarcodeBinary(item);
+  const moduleWidth = (cellWidth - padding * 2) / binary.length;
+  const barcodeWidth = moduleWidth * binary.length;
+  const barcodeX = x + (cellWidth - barcodeWidth) / 2;
+
+  drawBarcodeBinary(page, binary, barcodeX, barcodeY, moduleWidth, barcodeHeight);
+  drawCenteredText(page, label, x, bottomY, cellWidth, labelSize, font);
+}
+
+/**
+ * @param {PDFDocument} pdf
+ * @param {import('pdf-lib').PDFPage} page
+ * @param {{ type: 'qrcode', value: string, label: string }} item
+ * @param {number} x
+ * @param {number} y
+ * @param {number} cellWidth
+ * @param {number} cellHeight
+ * @param {import('pdf-lib').PDFFont} font
+ */
+async function drawQrCodePdfItem(pdf, page, item, x, y, cellWidth, cellHeight, font) {
+  const padding = Math.min(12, cellWidth * 0.08, cellHeight * 0.12);
+  const maxLabelWidth = cellWidth - padding * 2;
+  const displayLabel = getPdfSafeLabel(item.value);
+  const labelSize = fitTextSize(font, displayLabel, Math.min(12, Math.max(7, cellHeight * 0.09)), 5, maxLabelWidth);
+  const label = fitText(font, displayLabel, labelSize, maxLabelWidth);
+  const qrDataUrl = await QRCode.toDataURL(item.value, {
+    width: 512,
+    margin: 1
+  });
+  const qrImage = await pdf.embedPng(dataUrlToBytes(qrDataUrl));
+  const maxQrSize = Math.max(18, cellHeight - padding * 2 - labelSize - 8);
+  const qrSize = Math.min(cellWidth - padding * 2, maxQrSize, 220);
+  const contentHeight = qrSize + labelSize + 8;
+  const bottomY = y + (cellHeight - contentHeight) / 2;
+  const qrX = x + (cellWidth - qrSize) / 2;
+  const qrY = bottomY + labelSize + 8;
+
+  page.drawImage(qrImage, { x: qrX, y: qrY, width: qrSize, height: qrSize });
+  drawCenteredText(page, label, x, bottomY, cellWidth, labelSize, font);
+}
+
+/**
+ * @param {{ type: 'ean13'|'code128', value: string, label: string }} item
+ */
+function getBarcodeBinary(item) {
+  const barcode = {};
+  const format = item.type === 'ean13' ? 'EAN13' : 'CODE128';
+
+  try {
+    JsBarcode(barcode, item.value, {
+      format,
+      displayValue: false,
+      margin: 0,
+      width: 1,
+      height: 100
+    });
+  } catch (error) {
+    throw new Error(`Invalid ${item.label} value "${item.value}": ${String(error)}`);
+  }
+
+  if (!Array.isArray(barcode.encodings)) {
+    throw new Error(`Unable to encode ${item.label} value "${item.value}".`);
+  }
+
+  const binary = barcode.encodings.map((encoding) => encoding.data || '').join('');
+  if (!/^[01]+$/.test(binary)) {
+    throw new Error(`Unable to encode ${item.label} value "${item.value}".`);
+  }
+
+  return binary;
+}
+
+/**
+ * @param {import('pdf-lib').PDFPage} page
+ * @param {string} binary
+ * @param {number} x
+ * @param {number} y
+ * @param {number} moduleWidth
+ * @param {number} height
+ */
+function drawBarcodeBinary(page, binary, x, y, moduleWidth, height) {
+  let runStart = null;
+
+  for (let index = 0; index <= binary.length; index += 1) {
+    if (binary[index] === '1' && runStart === null) {
+      runStart = index;
+      continue;
+    }
+
+    if ((binary[index] !== '1' || index === binary.length) && runStart !== null) {
+      page.drawRectangle({
+        x: x + runStart * moduleWidth,
+        y,
+        width: (index - runStart) * moduleWidth,
+        height,
+        color: rgb(0, 0, 0)
+      });
+      runStart = null;
+    }
+  }
+}
+
+/**
+ * @param {import('pdf-lib').PDFPage} page
+ * @param {string} text
+ * @param {number} x
+ * @param {number} y
+ * @param {number} width
+ * @param {number} size
+ * @param {import('pdf-lib').PDFFont} font
+ */
+function drawCenteredText(page, text, x, y, width, size, font) {
+  const textWidth = font.widthOfTextAtSize(text, size);
+  page.drawText(text, {
+    x: x + (width - textWidth) / 2,
+    y,
+    size,
+    font,
+    color: rgb(0, 0, 0)
+  });
+}
+
+/**
+ * @param {import('pdf-lib').PDFFont} font
+ * @param {string} text
+ * @param {number} preferredSize
+ * @param {number} minSize
+ * @param {number} maxWidth
+ */
+function fitTextSize(font, text, preferredSize, minSize, maxWidth) {
+  let size = preferredSize;
+  while (size > minSize && font.widthOfTextAtSize(text, size) > maxWidth) {
+    size -= 0.5;
+  }
+  return Math.max(minSize, size);
+}
+
+/**
+ * @param {import('pdf-lib').PDFFont} font
+ * @param {string} text
+ * @param {number} size
+ * @param {number} maxWidth
+ */
+function fitText(font, text, size, maxWidth) {
+  if (font.widthOfTextAtSize(text, size) <= maxWidth) {
+    return text;
+  }
+
+  const suffix = '...';
+  let end = text.length;
+  while (end > suffix.length && font.widthOfTextAtSize(`${text.slice(0, end)}${suffix}`, size) > maxWidth) {
+    end -= 1;
+  }
+
+  return end > suffix.length ? `${text.slice(0, end)}${suffix}` : suffix;
+}
+
+/**
+ * @param {string} value
+ */
+function getPdfSafeLabel(value) {
+  const printable = value.replace(/[^\x20-\x7E]/g, '?');
+  return printable || '[encoded value]';
 }
 
 function dataUrlToBytes(dataUrl) {
